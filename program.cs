@@ -1,231 +1,270 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
+// ============================================================
+// Cogas Vacature Melder
+// Dit programma controleert dagelijks of er nieuwe vacatures
+// zijn op werkenbij.cogas.nl en stuurt een e-mail als dat zo is.
+// ============================================================
+
 using System.Net.Mail;
 using System.Net;
 using Newtonsoft.Json;
 using Microsoft.Playwright;
 
-class Program
+// ── Instellingen ─────────────────────────────────────────────
+string vacaturePagina = "https://werkenbij.cogas.nl/vacatures";
+string opslagBestand  = "vacancies.json";
+// ─────────────────────────────────────────────────────────────
+
+Console.WriteLine("=== Cogas Vacature Melder gestart ===");
+
+// Stap 1: haal alle huidige vacatures op van de website
+var gevondenVacatures = await HaalVacaturesOpVanWebsite();
+
+if (gevondenVacatures.Count == 0)
 {
-    private static readonly string Url = "https://werkenbij.cogas.nl/vacatures";
-    private static readonly string JsonFile = "vacancies.json";
+    Console.WriteLine("Geen vacatures gevonden op de website. Programma stopt.");
+    return;
+}
 
-    public static async Task Main(string[] args)
+Console.WriteLine($"{gevondenVacatures.Count} vacature(s) gevonden op de website.");
+
+// Stap 2: lees de eerder opgeslagen vacatures uit het JSON-bestand
+var oudeVacatures = LeesOpgeslagenVacatures();
+
+// Stap 3: vergelijk — welke vacatures zijn er nieuw bijgekomen?
+var oudeVacatureTitels = oudeVacatures.Select(v => v.Titel).ToHashSet();
+var nieuweVacatures    = gevondenVacatures.Where(v => !oudeVacatureTitels.Contains(v.Titel)).ToList();
+
+// Stap 4: stuur een e-mail als er nieuwe vacatures zijn
+if (nieuweVacatures.Count > 0)
+{
+    Console.WriteLine($"Goed nieuws: {nieuweVacatures.Count} nieuwe vacature(s) gevonden!");
+    StuurEmail(nieuweVacatures);
+}
+else
+{
+    Console.WriteLine("Geen nieuwe vacatures sinds de laatste controle.");
+}
+
+// Stap 5: sla de huidige vacatures op voor de volgende keer
+SlaVacaturesOp(gevondenVacatures);
+
+Console.WriteLine("=== Klaar ===");
+
+
+// ════════════════════════════════════════════════════════════
+// FUNCTIES
+// ════════════════════════════════════════════════════════════
+
+// Opent de Cogas-website met een echte browser (Playwright),
+// leest alle vacaturetitels uit en klikt op elke kaart
+// om de directe link naar de vacature te achterhalen.
+async Task<List<Vacature>> HaalVacaturesOpVanWebsite()
+{
+    var resultaat = new List<Vacature>();
+
+    try
     {
-        Console.WriteLine("Start vacature-controle via Playwright...");
+        // Start een onzichtbare browser op de achtergrond
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(
+            new BrowserTypeLaunchOptions { Headless = true }
+        );
 
-        var currentVacancies = await GetCurrentVacanciesAsync();
-
-        if (currentVacancies.Count == 0)
+        // --- Overzichtspagina laden en titels verzamelen ---
+        Console.WriteLine("Website laden...");
+        var overzichtsPagina = await browser.NewPageAsync();
+        await overzichtsPagina.GotoAsync(vacaturePagina, new PageGotoOptions
         {
-            Console.WriteLine("Geen vacatures gevonden op de pagina. Afbreken.");
-            return;
+            Timeout    = 30_000,              // maximaal 30 seconden wachten
+            WaitUntil  = WaitUntilState.NetworkIdle  // wacht tot de pagina klaar is
+        });
+
+        // De vacaturetitels staan in <h4> elementen op de pagina
+        var titelElementen = await overzichtsPagina.QuerySelectorAllAsync("h4");
+        var titels = new List<string>();
+
+        foreach (var element in titelElementen)
+        {
+            string titel = (await element.InnerTextAsync())?.Trim() ?? "";
+            if (titel.Length > 3)
+                titels.Add(titel);
         }
 
-        Console.WriteLine($"{currentVacancies.Count} vacature(s) gevonden op de pagina.");
+        Console.WriteLine($"{titels.Count} vacaturetitel(s) gevonden. Links ophalen...");
+        await overzichtsPagina.CloseAsync();
 
-        // Lees eerder opgeslagen vacatures uit JSON
-        var oldVacancies = new List<JobVacancy>();
-        if (File.Exists(JsonFile))
+        // --- Per vacature: klik op de kaart en vang de URL op ---
+        foreach (var titel in titels)
         {
             try
             {
-                string jsonContent = File.ReadAllText(JsonFile);
-                oldVacancies = JsonConvert.DeserializeObject<List<JobVacancy>>(jsonContent)
-                               ?? new List<JobVacancy>();
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Fout bij lezen JSON-bestand: {ex.Message}");
-            }
-        }
-        else
-        {
-            File.WriteAllText(JsonFile, "[]");
-        }
+                // Open een nieuwe browsertab voor elke vacature
+                var detailPagina = await browser.NewPageAsync();
 
-        // Vergelijk op basis van titel
-        var oldTitles = new HashSet<string>(oldVacancies.Select(v => v.Title));
-        var newVacancies = currentVacancies.Where(v => !oldTitles.Contains(v.Title)).ToList();
-
-        if (newVacancies.Count > 0)
-        {
-            Console.WriteLine($"{newVacancies.Count} nieuwe vacature(s) gevonden!");
-            SendEmailNotification(newVacancies);
-        }
-        else
-        {
-            Console.WriteLine("Geen nieuwe vacatures gevonden.");
-        }
-
-        // Sla huidige stand op
-        string updatedJson = JsonConvert.SerializeObject(currentVacancies, Formatting.Indented);
-        File.WriteAllText(JsonFile, updatedJson);
-        Console.WriteLine("vacancies.json bijgewerkt.");
-    }
-
-    private static async Task<List<JobVacancy>> GetCurrentVacanciesAsync()
-    {
-        var vacancies = new List<JobVacancy>();
-
-        try
-        {
-            using var playwright = await Playwright.CreateAsync();
-            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
-            {
-                Headless = true
-            });
-
-            // Stap 1: haal alle titels op van de overzichtspagina
-            var overviewPage = await browser.NewPageAsync();
-            await overviewPage.GotoAsync(Url, new PageGotoOptions
-            {
-                Timeout = 30_000,
-                WaitUntil = WaitUntilState.NetworkIdle
-            });
-
-            var headings = await overviewPage.QuerySelectorAllAsync("h4");
-            var titles = new List<string>();
-
-            foreach (var heading in headings)
-            {
-                string title = (await heading.InnerTextAsync())?.Trim() ?? string.Empty;
-                if (!string.IsNullOrEmpty(title) && title.Length > 3)
-                    titles.Add(title);
-            }
-
-            Console.WriteLine($"{titles.Count} vacaturetitel(s) gevonden op de overzichtspagina.");
-            await overviewPage.CloseAsync();
-
-            // Stap 2: klik op elke kaart en vang de URL op
-            foreach (var title in titles)
-            {
-                try
+                // Ga terug naar het overzicht
+                await detailPagina.GotoAsync(vacaturePagina, new PageGotoOptions
                 {
-                    var detailPage = await browser.NewPageAsync();
+                    Timeout   = 30_000,
+                    WaitUntil = WaitUntilState.NetworkIdle
+                });
 
-                    // Ga terug naar overzicht
-                    await detailPage.GotoAsync(Url, new PageGotoOptions
+                // Zoek de vacaturekaart met deze titel en klik erop
+                var kaart = await detailPagina.QuerySelectorAsync($"h4 >> text=\"{titel}\"");
+
+                if (kaart == null)
+                {
+                    // Kaart niet gevonden — voeg toch toe met de overzichtslink als fallback
+                    Console.WriteLine($"  Kaart niet klikbaar: {titel}");
+                    resultaat.Add(new Vacature { Titel = titel, Link = vacaturePagina });
+                    await detailPagina.CloseAsync();
+                    continue;
+                }
+
+                // Klik op de kaart en wacht tot de nieuwe pagina geladen is
+                await Task.WhenAll(
+                    detailPagina.WaitForNavigationAsync(new PageWaitForNavigationOptions
                     {
-                        Timeout = 30_000,
+                        Timeout   = 15_000,
                         WaitUntil = WaitUntilState.NetworkIdle
-                    });
+                    }),
+                    kaart.ClickAsync()
+                );
 
-                    // Klik op de h4 met deze exacte titel
-                    var card = await detailPage.QuerySelectorAsync($"h4 >> text=\"{title}\"");
-                    if (card == null)
-                    {
-                        Console.WriteLine($"  Kaart niet gevonden voor: {title}");
-                        vacancies.Add(new JobVacancy { Title = title, Link = Url });
-                        await detailPage.CloseAsync();
-                        continue;
-                    }
+                // De URL van de pagina waar we nu op staan = de vacaturelink
+                string link = detailPagina.Url;
+                Console.WriteLine($"  Gevonden: {titel}");
+                Console.WriteLine($"            {link}");
 
-                    // Wacht op navigatie na de klik
-                    await Task.WhenAll(
-                        detailPage.WaitForNavigationAsync(new PageWaitForNavigationOptions
-                        {
-                            Timeout = 15_000,
-                            WaitUntil = WaitUntilState.NetworkIdle
-                        }),
-                        card.ClickAsync()
-                    );
-
-                    string finalUrl = detailPage.Url;
-                    Console.WriteLine($"  Gevonden: {title} -> {finalUrl}");
-                    vacancies.Add(new JobVacancy { Title = title, Link = finalUrl });
-
-                    await detailPage.CloseAsync();
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"  Fout bij ophalen link voor '{title}': {ex.Message}");
-                    // Voeg toch toe met fallback-URL
-                    vacancies.Add(new JobVacancy { Title = title, Link = Url });
-                }
+                resultaat.Add(new Vacature { Titel = titel, Link = link });
+                await detailPagina.CloseAsync();
+            }
+            catch (Exception fout)
+            {
+                Console.WriteLine($"  Fout bij '{titel}': {fout.Message}");
+                resultaat.Add(new Vacature { Titel = titel, Link = vacaturePagina });
             }
         }
-        catch (TimeoutException)
-        {
-            Console.WriteLine("Time-out bij laden van de vacaturepagina.");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Fout bij ophalen via Playwright: {ex.Message}");
-        }
-
-        return vacancies;
+    }
+    catch (Exception fout)
+    {
+        Console.WriteLine($"Fout bij het laden van de website: {fout.Message}");
     }
 
-    private static void SendEmailNotification(List<JobVacancy> newVacancies)
+    return resultaat;
+}
+
+
+// Leest het JSON-bestand met eerder gevonden vacatures.
+// Als het bestand nog niet bestaat, geeft het een lege lijst terug.
+List<Vacature> LeesOpgeslagenVacatures()
+{
+    if (!File.Exists(opslagBestand))
     {
-        string? senderEmail    = Environment.GetEnvironmentVariable("MAIL_USERNAME");
-        string? senderPassword = Environment.GetEnvironmentVariable("MAIL_PASSWORD");
-        string? receiverEmail  = Environment.GetEnvironmentVariable("MAIL_TO");
+        Console.WriteLine("Geen eerder opgeslagen vacatures gevonden (eerste keer).");
+        return new List<Vacature>();
+    }
 
-        if (string.IsNullOrEmpty(senderEmail) ||
-            string.IsNullOrEmpty(senderPassword) ||
-            string.IsNullOrEmpty(receiverEmail))
-        {
-            Console.WriteLine("E-mailconfiguratie ontbreekt in omgevingsvariabelen.");
-            return;
-        }
-
-        try
-        {
-            string vacancyListHtml = string.Join("\n", newVacancies.Select(v =>
-                $"  <li><a href=\"{v.Link}\">{System.Net.WebUtility.HtmlEncode(v.Title)}</a></li>"
-            ));
-
-            string htmlBody = $"""
-                <html>
-                <body style="font-family: Arial, sans-serif; color: #222;">
-                  <h2>Nieuwe Cogas vacature(s) gevonden!</h2>
-                  <p>Er {(newVacancies.Count == 1 ? "is" : "zijn")} <strong>{newVacancies.Count}</strong>
-                     nieuwe vacature(s) beschikbaar bij Cogas:</p>
-                  <ul>
-                {vacancyListHtml}
-                  </ul>
-                  <p style="color: #666; font-size: 0.9em;">
-                    Bekijk alle vacatures op
-                    <a href="https://werkenbij.cogas.nl/vacatures">werkenbij.cogas.nl</a>.
-                  </p>
-                </body>
-                </html>
-                """;
-
-            var mailMessage = new MailMessage
-            {
-                From       = new MailAddress(senderEmail, "Cogas Vacature Melder"),
-                Subject    = $"Nieuwe Cogas vacature(s) gevonden! ({newVacancies.Count})",
-                Body       = htmlBody,
-                IsBodyHtml = true
-            };
-            mailMessage.To.Add(receiverEmail);
-
-            using var smtpClient = new SmtpClient("smtp.gmail.com")
-            {
-                Port        = 587,
-                Credentials = new NetworkCredential(senderEmail, senderPassword),
-                EnableSsl   = true
-            };
-
-            smtpClient.Send(mailMessage);
-            Console.WriteLine("E-mail succesvol verzonden!");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Fout bij verzenden e-mail: {ex.Message}");
-        }
+    try
+    {
+        string inhoud = File.ReadAllText(opslagBestand);
+        return JsonConvert.DeserializeObject<List<Vacature>>(inhoud) ?? new List<Vacature>();
+    }
+    catch (Exception fout)
+    {
+        Console.WriteLine($"Fout bij lezen van opgeslagen vacatures: {fout.Message}");
+        return new List<Vacature>();
     }
 }
 
-public class JobVacancy
+
+// Slaat de huidige vacaturelijst op als JSON-bestand,
+// zodat we de volgende keer kunnen vergelijken.
+void SlaVacaturesOp(List<Vacature> vacatures)
 {
-    [JsonProperty("title")]
-    public string Title { get; set; } = string.Empty;
+    string jsonInhoud = JsonConvert.SerializeObject(vacatures, Formatting.Indented);
+    File.WriteAllText(opslagBestand, jsonInhoud);
+    Console.WriteLine($"Vacatures opgeslagen in {opslagBestand}.");
+}
+
+
+// Stuurt een e-mail met een overzicht van de nieuwe vacatures.
+// De e-mailinstellingen worden gelezen uit omgevingsvariabelen
+// zodat wachtwoorden niet in de code staan.
+void StuurEmail(List<Vacature> nieuweVacatures)
+{
+    // Lees de e-mailinstellingen uit de omgevingsvariabelen
+    string? afzender   = Environment.GetEnvironmentVariable("MAIL_USERNAME");
+    string? wachtwoord = Environment.GetEnvironmentVariable("MAIL_PASSWORD");
+    string? ontvanger  = Environment.GetEnvironmentVariable("MAIL_TO");
+
+    if (string.IsNullOrEmpty(afzender) || string.IsNullOrEmpty(wachtwoord) || string.IsNullOrEmpty(ontvanger))
+    {
+        Console.WriteLine("E-mailinstellingen ontbreken. Stel MAIL_USERNAME, MAIL_PASSWORD en MAIL_TO in.");
+        return;
+    }
+
+    try
+    {
+        // Bouw de lijst met vacatures op als klikbare HTML-links
+        string vacatureLijst = string.Join("\n", nieuweVacatures.Select(v =>
+            $"  <li><a href=\"{v.Link}\">{System.Net.WebUtility.HtmlEncode(v.Titel)}</a></li>"
+        ));
+
+        string aantalText = nieuweVacatures.Count == 1 ? "is 1 nieuwe vacature" : $"zijn {nieuweVacatures.Count} nieuwe vacatures";
+
+        string emailInhoud = $"""
+            <html>
+            <body style="font-family: Arial, sans-serif; color: #222;">
+              <h2>Nieuwe vacature(s) bij Cogas!</h2>
+              <p>Er {aantalText} beschikbaar:</p>
+              <ul>
+            {vacatureLijst}
+              </ul>
+              <p style="color: #888; font-size: 0.9em;">
+                Bekijk alle vacatures op
+                <a href="https://werkenbij.cogas.nl/vacatures">werkenbij.cogas.nl</a>.
+              </p>
+            </body>
+            </html>
+            """;
+
+        // Stel de e-mail in
+        var email = new MailMessage
+        {
+            From       = new MailAddress(afzender, "Cogas Vacature Melder"),
+            Subject    = $"Nieuwe Cogas vacature(s)! ({nieuweVacatures.Count})",
+            Body       = emailInhoud,
+            IsBodyHtml = true
+        };
+        email.To.Add(ontvanger);
+
+        // Verstuur via Gmail
+        using var smtp = new SmtpClient("smtp.gmail.com")
+        {
+            Port        = 587,
+            Credentials = new NetworkCredential(afzender, wachtwoord),
+            EnableSsl   = true
+        };
+
+        smtp.Send(email);
+        Console.WriteLine("E-mail verstuurd!");
+    }
+    catch (Exception fout)
+    {
+        Console.WriteLine($"Fout bij versturen e-mail: {fout.Message}");
+    }
+}
+
+
+// ════════════════════════════════════════════════════════════
+// DATAMODEL
+// Een vacature heeft een titel (naam van de baan) en een link
+// (de URL naar de vacaturepagina op de Cogas-website).
+// ════════════════════════════════════════════════════════════
+public class Vacature
+{
+    [JsonProperty("titel")]
+    public string Titel { get; set; } = string.Empty;
 
     [JsonProperty("link")]
     public string Link { get; set; } = string.Empty;
