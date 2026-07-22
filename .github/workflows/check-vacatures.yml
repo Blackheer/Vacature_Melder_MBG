@@ -23,15 +23,21 @@ jobs:
       - name: Restore dependencies
         run: dotnet restore
 
+      - name: Build project
+        run: dotnet build --configuration Release
+
       - name: Install Playwright browsers
-        run: dotnet tool run playwright install --with-deps
+        run: |
+          # Zoek de Playwright CLI via het NuGet pakket en installeer de browsers
+          dotnet nuget locals global-packages -l
+          dotnet exec $(find ~/.nuget/packages -name Microsoft.Playwright.Cli.dll | head -n 1) install --with-deps
 
       - name: Run C# script
         env:
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
-        run: dotnet run --configuration Release
+        run: dotnet run --configuration Release --no-build
 
       - name: Commit and push if vacancies changed
         run: |
