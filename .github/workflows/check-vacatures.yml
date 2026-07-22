@@ -1,6 +1,4 @@
-# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
-
-name: Check Cogas Vacancies (.NET)
+name: Check Cogas Vacancies (Playwright)
 
 on:
   schedule:
@@ -25,6 +23,9 @@ jobs:
       - name: Restore dependencies
         run: dotnet restore
 
+      - name: Install Playwright browsers
+        run: dotnet tool run playwright install --with-deps
+
       - name: Run C# script
         env:
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
@@ -37,5 +38,5 @@ jobs:
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
           git add vacancies.json
-          git diff --staged --quiet || git commit -m "Update vacatures lijst via .NET"
+          git diff --staged --quiet || git commit -m "Update vacatures lijst via Playwright"
           git push
