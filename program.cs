@@ -2,24 +2,23 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Net.Http;
-using System.Net.Mail;
 using System.Net;
+using System.Net.Mail;
+using System.Threading.Tasks;
 using Newtonsoft.Json;
-using HtmlAgilityPack;
+using Microsoft.Playwright;
 
 class Program
 {
     private static readonly string Url = "https://werkenbij.cogas.nl/vacatures?functiegroep=";
     private static readonly string JsonFile = "vacancies.json";
 
-    public static void Main(string[] args)
+    public static async Task Main(string[] args)
     {
-        Console.WriteLine("Start vacature-controle...");
+        Console.WriteLine("Start vacature-controle via Playwright...");
 
-        var currentVacancies = GetCurrentVacancies();
+        var currentVacancies = await GetCurrentVacanciesAsync();
         
-        // Zorg altijd dat er minimaal een leeg JSON-bestand is, ook als de lijst tijdelijk leeg is
         if (!File.Exists(JsonFile))
         {
             File.WriteAllText(JsonFile, "[]");
@@ -58,56 +57,52 @@ class Program
             Console.WriteLine("Geen nieuwe vacatures gevonden.");
         }
 
-        // Sla de actuele lijst altijd op, zodat het bestand er sowieso is voor git
         string updatedJson = JsonConvert.SerializeObject(currentVacancies, Formatting.Indented);
         File.WriteAllText(JsonFile, updatedJson);
     }
 
-    private static List<JobVacancy> GetCurrentVacancies()
+    private static async Task<List<JobVacancy>> GetCurrentVacanciesAsync()
     {
         var vacancies = new List<JobVacancy>();
         try
         {
-            using (var httpClient = new HttpClient())
+            // Installeer en start de headless browser
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+
+            // Ga naar de Cogas vacaturepagina
+            await page.GotoAsync(Url);
+            
+            // Wacht even tot de vacature-elementen geladen zijn op de pagina
+            await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+
+            // Zoek naar alle links op de pagina die naar een vacature wijzen
+            var elements = await page.QuerySelectorAllAsync("a[href*='/vacature/']");
+
+            foreach (var element in elements)
             {
-                httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
-                string html = httpClient.GetStringAsync(Url).Result;
+                string href = await element.GetAttributeAsync("href") ?? string.Empty;
+                string title = (await element.InnerTextAsync())?.Trim() ?? string.Empty;
 
-                var doc = new HtmlDocument();
-                doc.LoadHtml(html);
-
-                // Zoek specifiek naar links of koppen binnen de vacatureblokken
-                var links = doc.DocumentNode.SelectNodes("//a[@href]");
-                if (links != null)
+                if (!string.IsNullOrEmpty(title) && title.Length > 3)
                 {
-                    foreach (var linkNode in links)
+                    if (href.StartsWith("/"))
                     {
-                        string href = linkNode.GetAttributeValue("href", string.Empty);
-                        if (href.Contains("/vacature/"))
-                        {
-                            string title = HtmlEntity.DeEntitize(linkNode.InnerText.Trim());
+                        href = "https://werkenbij.cogas.nl" + href;
+                    }
 
-                            if (!string.IsNullOrEmpty(title) && title.Length > 3)
-                            {
-                                if (href.StartsWith("/"))
-                                {
-                                    href = "https://werkenbij.cogas.nl" + href;
-                                }
-
-                                var vacancy = new JobVacancy { Title = title, Link = href };
-                                if (!vacancies.Any(v => v.Link == vacancy.Link))
-                                {
-                                    vacancies.Add(vacancy);
-                                }
-                            }
-                        }
+                    var vacancy = new JobVacancy { Title = title, Link = href };
+                    if (!vacancies.Any(v => v.Link == vacancy.Link))
+                    {
+                        vacancies.Add(vacancy);
                     }
                 }
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Fout bij ophalen pagina: {ex.Message}");
+            Console.WriteLine($"Fout bij ophalen via Playwright: {ex.Message}");
         }
 
         return vacancies;
