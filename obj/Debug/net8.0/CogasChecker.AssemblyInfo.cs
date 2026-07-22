@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("CogasChecker")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+1d99e60031c6d2cb58751b72f8e221253cddeacb")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+ba043a5415d8199ab3c5f45ffa1f496fa55052f2")]
 [assembly: System.Reflection.AssemblyProductAttribute("CogasChecker")]
 [assembly: System.Reflection.AssemblyTitleAttribute("CogasChecker")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
