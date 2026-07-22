@@ -18,6 +18,13 @@ class Program
         Console.WriteLine("Start vacature-controle...");
 
         var currentVacancies = GetCurrentVacancies();
+        
+        // Zorg altijd dat er minimaal een leeg JSON-bestand is, ook als de lijst tijdelijk leeg is
+        if (!File.Exists(JsonFile))
+        {
+            File.WriteAllText(JsonFile, "[]");
+        }
+
         if (currentVacancies.Count == 0)
         {
             Console.WriteLine("Geen vacatures gevonden op de pagina.");
@@ -45,14 +52,15 @@ class Program
         {
             Console.WriteLine($"Er zijn {newVacancies.Count} nieuwe vacatures gevonden!");
             SendNotification(newVacancies);
-
-            string updatedJson = JsonConvert.SerializeObject(currentVacancies, Formatting.Indented);
-            File.WriteAllText(JsonFile, updatedJson);
         }
         else
         {
             Console.WriteLine("Geen nieuwe vacatures gevonden.");
         }
+
+        // Sla de actuele lijst altijd op, zodat het bestand er sowieso is voor git
+        string updatedJson = JsonConvert.SerializeObject(currentVacancies, Formatting.Indented);
+        File.WriteAllText(JsonFile, updatedJson);
     }
 
     private static List<JobVacancy> GetCurrentVacancies()
@@ -60,7 +68,6 @@ class Program
         var vacancies = new List<JobVacancy>();
         try
         {
-            // Gebruik HttpClient in plaats van de verouderde WebClient
             using (var httpClient = new HttpClient())
             {
                 httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
@@ -69,6 +76,7 @@ class Program
                 var doc = new HtmlDocument();
                 doc.LoadHtml(html);
 
+                // Zoek specifiek naar links of koppen binnen de vacatureblokken
                 var links = doc.DocumentNode.SelectNodes("//a[@href]");
                 if (links != null)
                 {
